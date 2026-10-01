@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - uses: gradle/actions/setup-gradle@v5
+      # `build` compiles with warnings as errors and explicit-API mode (the lint), runs the
+      # tests and compiles the example. publishToMavenLocal checks the POM and artifacts.
+      - run: ./gradlew build publishToMavenLocal
