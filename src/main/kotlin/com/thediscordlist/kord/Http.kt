@@ -61,8 +61,8 @@ internal fun backoffMs(attempt: Int, random: Random): Long =
     (min(1000L shl attempt, 30_000L) * (0.5 + random.nextDouble() * 0.5)).roundToLong()
 
 /**
- * One client per poster, with one suspension: the API keeps a single rate-limit counter per
- * client IP across stats and commands. Heartbeats bypass it, because a dropped stats post is a
+ * One client per poster, with one suspension: the API counts stats and commands against one
+ * per-bot budget. Heartbeats bypass it, because a dropped stats post is a
  * stale number but a dropped heartbeat is a false "down" on the public status page.
  *
  * Not thread-safe on its own; the engine confines every call to one dispatcher.
