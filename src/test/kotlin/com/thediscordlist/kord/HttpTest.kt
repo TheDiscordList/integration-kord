@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.net.InetSocketAddress
 import java.util.Collections
 import kotlin.random.Random
@@ -81,7 +82,10 @@ class HttpTest {
             404 to Outcome.Config(404),
             409 to Outcome.Config(409),
             400 to Outcome.Payload(400),
+            405 to Outcome.Payload(405),
             422 to Outcome.Payload(422),
+            408 to Outcome.Transient(408, "TheDiscordList responded 408."),
+            425 to Outcome.Transient(425, "TheDiscordList responded 425."),
             500 to Outcome.Transient(500, "TheDiscordList responded 500."),
             502 to Outcome.Transient(502, "TheDiscordList responded 502."),
         )
@@ -100,7 +104,7 @@ class HttpTest {
     @Test
     fun `honours Retry-After and X-RateLimit-Reset, and lets heartbeats through`(): Unit = runBlocking {
         val api = client()
-        val resetAt = clock / 1000 + 120
+        val resetAt = System.currentTimeMillis() / 1000 + 120
         respond = { it.send(429, "", mapOf("Retry-After" to "5", "X-RateLimit-Reset" to "$resetAt")) }
         assertEquals(Outcome.Throttled(5_000), api.post("/bots/1/stats", stats, heartbeat = false))
 
@@ -128,6 +132,31 @@ class HttpTest {
         assertEquals(Outcome.Dropped, api.post("/bots/1/stats", stats, heartbeat = false))
         clock += 4_000
         assertIs<Outcome.Ok>(api.post("/bots/1/stats", stats, heartbeat = false))
+    }
+
+    @Test
+    fun `suspends for at most an hour`(): Unit = runBlocking {
+        val api = client()
+        val resetAt = System.currentTimeMillis() / 1000 + 86_400
+        respond = { it.send(429, "", mapOf("Retry-After" to "86400", "X-RateLimit-Reset" to "$resetAt")) }
+        api.post("/bots/1/stats", stats, heartbeat = false)
+
+        respond = { it.send(200, "{}") }
+        clock += 3_600_000 + 2_001
+        assertIs<Outcome.Ok>(api.post("/bots/1/stats", stats, heartbeat = false))
+    }
+
+    @Test
+    fun `close shuts the client down`(): Unit = runBlocking {
+        assumeTrue(Runtime.version().feature() >= 21, "HttpClient is closeable from Java 21")
+        val transport = JdkTransport()
+        val api = client(transport)
+        assertIs<Outcome.Ok>(api.post("/bots/1/heartbeat", stats, heartbeat = true))
+
+        api.close()
+
+        assertIs<Outcome.Transient>(api.post("/bots/1/heartbeat", stats, heartbeat = true))
+        assertEquals(1, received.size)
     }
 
     @Test

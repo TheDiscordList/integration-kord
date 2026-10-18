@@ -71,7 +71,7 @@ class EngineTest {
     }
 
     @Test
-    fun `coalesces a burst of shard transitions into one extra beat`() = runTest {
+    fun `coalesces a burst of shard transitions into one extra beat, 10 seconds after the last`() = runTest {
         val h = harness().started()
         runCurrent()
         advanceTimeBy(1_000)
@@ -81,7 +81,9 @@ class EngineTest {
         h.engine.onShardStatus(0, ShardStatus.CONNECTING)
         advanceTimeBy(200)
         h.engine.onShardStatus(0, ShardStatus.READY)
-        advanceTimeBy(1_001)
+        advanceTimeBy(8_599)
+        assertEquals(1, h.transport.to("heartbeat").size)
+        advanceTimeBy(2)
 
         val beats = h.transport.to("heartbeat")
         assertEquals(2, beats.size)
@@ -359,6 +361,17 @@ class EngineTest {
         advanceTimeBy(10 * 60_000)
 
         assertEquals(1, h.transport.requests.size)
+    }
+
+    @Test
+    fun `stop closes the transport once nothing is in flight`() = runTest {
+        val h = harness().started()
+        runCurrent()
+
+        h.engine.stop()
+        runCurrent()
+
+        assertTrue(h.transport.closed)
     }
 
     @Test

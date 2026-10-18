@@ -25,6 +25,7 @@ import kotlin.random.Random
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 public const val VERSION: String = "0.1.0"
 public const val DEFAULT_BASE_URL: String = "https://thediscordlist.com/api"
@@ -139,13 +140,16 @@ public class Autoposter internal constructor(private val engine: Engine?) {
  * With a missing token it logs a warning and returns an inert [Autoposter], so a forgotten
  * environment variable never takes down a deploy.
  */
-public fun Kord.autopost(token: String?, configure: AutopostOptions.() -> Unit = {}): Autoposter = autopost(
-    token = token,
-    options = AutopostOptions().apply(configure),
-    transport = JdkTransport(),
-    dispatcher = Dispatchers.Default.limitedParallelism(1),
-    now = System::currentTimeMillis,
-)
+public fun Kord.autopost(token: String?, configure: AutopostOptions.() -> Unit = {}): Autoposter {
+    val start = TimeSource.Monotonic.markNow()
+    return autopost(
+        token = token,
+        options = AutopostOptions().apply(configure),
+        transport = JdkTransport(),
+        dispatcher = Dispatchers.Default.limitedParallelism(1),
+        now = { start.elapsedNow().inWholeMilliseconds },
+    )
+}
 
 internal fun Kord.autopost(
     token: String?,
@@ -155,14 +159,15 @@ internal fun Kord.autopost(
     now: () -> Long,
     random: Random = Random.Default,
 ): Autoposter {
-    if (token.isNullOrBlank()) {
+    val key = token?.trim()?.removePrefix("Bearer ")?.trim()
+    if (key.isNullOrEmpty()) {
         warn("No stats token supplied; auto-posting is disabled.")
         return Autoposter(null)
     }
 
     val engine = Engine(
         view = KordView(this),
-        api = ApiClient(transport, options.baseUrl, token, now, random),
+        api = ApiClient(transport, options.baseUrl, key, now, random),
         botId = options.botId ?: resources.applicationId.toString(),
         options = options,
         parent = coroutineContext[Job],

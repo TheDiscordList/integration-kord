@@ -11,6 +11,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -34,6 +35,7 @@ internal const val STATS_FORCE_AFTER_MS = 1_800_000L
 internal const val HEARTBEAT_MIN_INTERVAL_MS = 15_000L
 internal const val HEARTBEAT_MAX_INTERVAL_MS = 60_000L
 internal const val HEARTBEAT_JITTER_MS = 5_000L
+internal const val HEARTBEAT_OUT_OF_BAND_GAP_MS = 10_000L
 
 /** Offset from the first stats post: the two share one server-side rate budget. */
 internal const val COMMANDS_DELAY_MS = 10_000L
@@ -102,6 +104,11 @@ internal class Engine(
     internal val scope = CoroutineScope(
         SupervisorJob(parent) + dispatcher + CoroutineExceptionHandler { _, error -> warn("Unexpected failure: $error") },
     )
+
+    init {
+        // Once the last request has settled, so closing the client never waits on one.
+        scope.coroutineContext.job.invokeOnCompletion { api.close() }
+    }
 
     private val mutableEvents = MutableSharedFlow<TdlEvent>(
         extraBufferCapacity = 64,
@@ -427,6 +434,7 @@ internal class StatsPublisher(engine: Engine, options: StatsOptions) : Publisher
 internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : Publisher(engine, PublisherType.HEARTBEAT) {
     private var interval = options.interval.inWholeMilliseconds
     private var inFlight = false
+    private var lastBeatAt: Long? = null
 
     fun start() {
         // Every beat hard-deletes the cluster rows with an id >= its cluster_count. A process that
@@ -444,10 +452,14 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
         schedule(0) { beat(manual = false) }
     }
 
-    /** Out-of-band beat after a shard transition. Calls within a second coalesce. */
+    /**
+     * Out-of-band beat after a shard transition, at least 10 seconds after the previous one.
+     * Calls within a second coalesce.
+     */
     fun beatNow() {
         if (disabledReason != null || engine.topology.clusterCount == null || engine.now() < suspendedUntil) return
-        schedule(1_000) { beat(manual = false) }
+        val earliest = lastBeatAt?.plus(HEARTBEAT_OUT_OF_BAND_GAP_MS) ?: 0L
+        schedule(maxOf(earliest - engine.now(), 1_000L)) { beat(manual = false) }
     }
 
     override suspend fun post(): PostResult {
@@ -462,6 +474,7 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
         val clusterCount = engine.topology.clusterCount ?: return skipped("cluster-count-unknown")
 
         val startedAt = engine.now()
+        lastBeatAt = startedAt
         val body = buildJsonObject {
             put("cluster", engine.topology.clusterId)
             put("cluster_count", clusterCount)
