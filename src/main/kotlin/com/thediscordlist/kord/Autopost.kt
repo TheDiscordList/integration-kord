@@ -27,7 +27,7 @@ import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
-public const val VERSION: String = "0.1.0"
+public const val VERSION: String = "0.2.0"
 public const val DEFAULT_BASE_URL: String = "https://thediscordlist.com/api"
 internal const val USER_AGENT = "TheDiscordList-Kord/$VERSION (+https://github.com/TheDiscordList/integration-kord)"
 

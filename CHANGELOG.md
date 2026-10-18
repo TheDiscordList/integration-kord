@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 - 2026-10-18
+
+- `WebhookData.ListingBumpReady` for `listing.bump_ready`, with `readyAt`.
+- `408` and `425` are retried like 5xx; every other `4xx` is reported once and
+  not retried.
+- A `429` suspends for at most an hour.
+- A shard transition beats no sooner than 10 seconds after the previous beat.
+- Suspensions and gaps run on the monotonic clock, so a wall-clock jump cannot
+  stretch or cut them short.
+- The HTTP client is closed when the poster stops, on Java 21 and newer.
+- A token pasted with surrounding whitespace or a leading `Bearer ` works.
+- A blank webhook secret is rejected like an empty one.
+
 ## 0.1.0 - 2026-10-15
 
 - `kord.autopost(token)`: posts server count, per-cluster shard heartbeats and global

@@ -10,7 +10,7 @@ No dependencies beyond Kord itself: HTTP is `java.net.http`, signatures are
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.thediscordlist:integration-kord:0.1.0")
+    implementation("com.thediscordlist:integration-kord:0.2.0")
 }
 ```
 
@@ -18,7 +18,7 @@ dependencies {
 <dependency>
   <groupId>com.thediscordlist</groupId>
   <artifactId>integration-kord</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
 </dependency>
 ```
 
@@ -280,7 +280,7 @@ One-time setup:
 Each release:
 
 1. Set `version` in `gradle.properties` and move the `CHANGELOG.md` entry under it.
-2. Commit, then tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 3. `release.yml` checks that the tag matches `version`, builds, signs and runs
    `publishAndReleaseToMavenCentral`. The artifact is searchable on Maven
    Central within about 30 minutes.
