@@ -169,6 +169,18 @@ class KordWiringTest {
     }
 
     @Test
+    fun `strips whitespace and a pasted Bearer prefix from the token`() = runTest {
+        val transport = FakeTransport()
+
+        kord(MutableSharedFlow()).closing { kord ->
+            kord.autopost(" Bearer tdl_token\n", AutopostOptions().apply { baseUrl = BASE }, transport, StandardTestDispatcher(testScheduler), { testScheduler.currentTime })
+            runCurrent()
+
+            assertEquals("Bearer tdl_token", transport.requests.first().headers["Authorization"])
+        }
+    }
+
+    @Test
     fun `a missing token returns an inert poster that never sends`() = runTest {
         val transport = FakeTransport()
 

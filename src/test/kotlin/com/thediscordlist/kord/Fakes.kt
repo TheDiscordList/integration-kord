@@ -13,11 +13,16 @@ internal data class Sent(val path: String, val headers: Map<String, String>, val
 internal class FakeTransport : Transport {
     val requests = mutableListOf<Sent>()
     var respond: (Sent) -> HttpReply = { reply(200) }
+    var closed = false
 
     override suspend fun post(url: String, headers: Map<String, String>, body: String): HttpReply {
         val sent = Sent(url.removePrefix(BASE), headers, Json.parseToJsonElement(body).jsonObject)
         requests += sent
         return respond(sent)
+    }
+
+    override fun close() {
+        closed = true
     }
 
     fun to(endpoint: String) = requests.filter { it.path.endsWith("/$endpoint") }

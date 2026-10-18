@@ -57,6 +57,12 @@ public sealed interface WebhookData {
         public val user: WebhookUser? = null,
     ) : WebhookData
 
+    /** The bump cooldown lifted. Sent once per cooldown. */
+    @Serializable
+    public data class ListingBumpReady(
+        @SerialName("ready_at") public val readyAt: String,
+    ) : WebhookData
+
     @Serializable
     public data class ListingUpvoted(
         @SerialName("voted_at") public val votedAt: String,
@@ -107,6 +113,7 @@ public data class WebhookEvent(
     public val payload: WebhookData
         get() = when (event) {
             "listing.bumped" -> decode(WebhookData.ListingBumped.serializer())
+            "listing.bump_ready" -> decode(WebhookData.ListingBumpReady.serializer())
             "listing.upvoted" -> decode(WebhookData.ListingUpvoted.serializer())
             "server.joined" -> decode(WebhookData.ServerJoined.serializer())
             "bot.added" -> decode(WebhookData.BotAdded.serializer())
@@ -168,8 +175,8 @@ public fun verifyWebhook(
         throw TdlWebhookException(WebhookErrorCode.STALE_TIMESTAMP, "Webhook timestamp outside the tolerance window.")
     }
 
-    if (secret.isEmpty()) {
-        throw TdlWebhookException(WebhookErrorCode.INVALID_SIGNATURE, "The webhook secret is empty.")
+    if (secret.isBlank()) {
+        throw TdlWebhookException(WebhookErrorCode.INVALID_SIGNATURE, "The webhook secret is blank.")
     }
     val mac = Mac.getInstance("HmacSHA256")
     mac.init(SecretKeySpec(secret.toByteArray(), "HmacSHA256"))

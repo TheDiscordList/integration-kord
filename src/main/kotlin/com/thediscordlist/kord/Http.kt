@@ -20,10 +20,12 @@ internal class HttpReply(val status: Int, val body: String, val header: (String)
 
 internal fun interface Transport {
     suspend fun post(url: String, headers: Map<String, String>, body: String): HttpReply
+
+    fun close() {}
 }
 
 internal class JdkTransport(private val timeout: Duration = 10.seconds) : Transport {
-    private val client by lazy { HttpClient.newBuilder().connectTimeout(timeout.toJavaDuration()).build() }
+    private val client = lazy { HttpClient.newBuilder().connectTimeout(timeout.toJavaDuration()).build() }
 
     override suspend fun post(url: String, headers: Map<String, String>, body: String): HttpReply {
         val request = HttpRequest.newBuilder(URI.create(url))
@@ -31,8 +33,13 @@ internal class JdkTransport(private val timeout: Duration = 10.seconds) : Transp
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .apply { headers.forEach { (name, value) -> header(name, value) } }
             .build()
-        val response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
+        val response = client.value.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
         return HttpReply(response.statusCode(), response.body()) { response.headers().firstValue(it).orElse(null) }
+    }
+
+    /** `HttpClient` is closeable from Java 21. Before that its threads end once it is unreachable. */
+    override fun close() {
+        if (client.isInitialized()) (client.value as? AutoCloseable)?.close()
     }
 }
 
@@ -47,13 +54,15 @@ internal sealed interface Outcome {
     data object Dropped : Outcome
 }
 
+private const val MAX_RETRY_AFTER_MS = 3_600_000L
+
 /** `min(1000 * 2^attempt, 30000)` scaled into its upper half. */
 internal fun backoffMs(attempt: Int, random: Random): Long =
     (min(1000L shl attempt, 30_000L) * (0.5 + random.nextDouble() * 0.5)).roundToLong()
 
 /**
- * One client per poster, with one suspension: the API keeps a single rate-limit counter per
- * client IP across stats and commands. Heartbeats bypass it, because a dropped stats post is a
+ * One client per poster, with one suspension: the API counts stats and commands against one
+ * per-bot budget. Heartbeats bypass it, because a dropped stats post is a
  * stale number but a dropped heartbeat is a false "down" on the public status page.
  *
  * Not thread-safe on its own; the engine confines every call to one dispatcher.
@@ -91,16 +100,20 @@ internal class ApiClient(
             // 404 is "unknown id, or the id belongs to a server listing". Never "bad token".
             404, 409 -> Outcome.Config(status)
             429 -> throttle(reply)
-            in 400..499 -> Outcome.Payload(status)
-            else -> Outcome.Transient(status, "TheDiscordList responded $status.")
+            408, 425, in 500..599 -> Outcome.Transient(status, "TheDiscordList responded $status.")
+            else -> Outcome.Payload(status)
         }
     }
+
+    fun close() = transport.close()
 
     private fun throttle(reply: HttpReply): Outcome.Throttled {
         val retryAfterMs = reply.header("Retry-After")?.toDoubleOrNull()?.takeIf { it > 0 }
             ?.let { (it * 1000).roundToLong() } ?: 60_000L
-        val resetAtMs = reply.header("X-RateLimit-Reset")?.toLongOrNull()?.takeIf { it > 0 }?.times(1000) ?: 0L
-        suspendedUntil = max(now() + retryAfterMs, resetAtMs) + random.nextLong(0, 2_001)
+        // The reset is a wall-clock epoch, so only the time left until it carries over to the monotonic clock.
+        val untilResetMs = reply.header("X-RateLimit-Reset")?.toLongOrNull()?.takeIf { it > 0 }
+            ?.let { it * 1000 - System.currentTimeMillis() } ?: 0L
+        suspendedUntil = now() + min(max(retryAfterMs, untilResetMs), MAX_RETRY_AFTER_MS) + random.nextLong(0, 2_001)
         return Outcome.Throttled(retryAfterMs)
     }
 }

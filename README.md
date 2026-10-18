@@ -10,7 +10,7 @@ No dependencies beyond Kord itself: HTTP is `java.net.http`, signatures are
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.thediscordlist:integration-kord:0.1.0")
+    implementation("com.thediscordlist:integration-kord:0.2.0")
 }
 ```
 
@@ -18,7 +18,7 @@ dependencies {
 <dependency>
   <groupId>com.thediscordlist</groupId>
   <artifactId>integration-kord</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
 </dependency>
 ```
 
@@ -43,7 +43,7 @@ It starts three publishers:
 | Publisher | What it sends | Cadence |
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after every shard is ready, then every 5 min, debounced on guild join/leave |
-| Heartbeat | per-shard status, latency and guild counts | immediately, then every ~30s, plus on any shard transition |
+| Heartbeat | per-shard status, latency and guild counts | immediately, then every ~30s, plus on any shard transition, at least 10s after the previous beat |
 | Commands | your registered global commands | once, ~10s after ready |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
@@ -194,6 +194,7 @@ can never verify, because the signature covers bytes, not meaning.
 | `event.event` | `event.payload` |
 | --- | --- |
 | `listing.bumped` | `WebhookData.ListingBumped` |
+| `listing.bump_ready` | `WebhookData.ListingBumpReady` |
 | `listing.upvoted` | `WebhookData.ListingUpvoted` |
 | `server.joined` | `WebhookData.ServerJoined` (server listings only) |
 | `bot.added` | `WebhookData.BotAdded` |
@@ -231,13 +232,16 @@ heartbeat's internal stats forward.
   suspends and reprobes every 30 minutes rather than disabling: the plan is
   checked per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** The API counts stats and commands against one
-  budget per client IP (60/min; heartbeats have their own 120/min). A `429`
-  suspends stats and commands together for `Retry-After`; heartbeats keep
-  beating, because a stale number beats a false "down" on your status page. On
-  shared hosting, other bots behind the same egress IP count against you.
+  budget per bot (60/min; heartbeats have their own 120/min). A `429`
+  suspends stats and commands together for `Retry-After` (or until
+  `X-RateLimit-Reset`, at most an hour); heartbeats keep beating, because a
+  stale number beats a false "down" on your status page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing, and it disables only the publisher that received it. A `401`
   is the bad-token signal, and it disables all three.
+- Transient failures (`408`, `425`, 5xx, timeouts, network) are retried twice
+  with jittered exponential backoff, then left to the next run. Any other `4xx`
+  is reported once and not retried.
 - **Only global commands are published.** Guild-scoped commands are not part of
   a listing.
 - **Keep the `Guilds` intent.** Kord's default intents include it. Without it
@@ -275,7 +279,7 @@ One-time setup:
 Each release:
 
 1. Set `version` in `gradle.properties` and move the `CHANGELOG.md` entry under it.
-2. Commit, then tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
 3. `release.yml` checks that the tag matches `version`, builds, signs and runs
    `publishAndReleaseToMavenCentral`. The artifact is searchable on Maven
    Central within about 30 minutes.
