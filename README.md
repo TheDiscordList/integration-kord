@@ -194,6 +194,7 @@ can never verify, because the signature covers bytes, not meaning.
 | `event.event` | `event.payload` |
 | --- | --- |
 | `listing.bumped` | `WebhookData.ListingBumped` |
+| `listing.bump_ready` | `WebhookData.ListingBumpReady` |
 | `listing.upvoted` | `WebhookData.ListingUpvoted` |
 | `server.joined` | `WebhookData.ServerJoined` (server listings only) |
 | `bot.added` | `WebhookData.BotAdded` |

@@ -65,6 +65,7 @@ class WebhooksTest {
     fun `rejects the wrong secret`() {
         assertRejected(WebhookErrorCode.INVALID_SIGNATURE) { verify(body, "t=$t,v1=${sign(body, secret = "whsec_other")}") }
         assertRejected(WebhookErrorCode.INVALID_SIGNATURE) { verify(body, "t=$t,v1=${sign(body)}", secret = "") }
+        assertRejected(WebhookErrorCode.INVALID_SIGNATURE) { verify(body, "t=$t,v1=${sign(body, secret = " ")}", secret = " ") }
     }
 
     @Test
@@ -137,6 +138,15 @@ class WebhooksTest {
                 user = WebhookUser(id = null, username = "sam", avatar = "https://cdn.discordapp.com/a.png"),
             ),
             event.payload,
+        )
+
+        val bumpReady = """{"id":"d4","event":"listing.bump_ready","created_at":"2026-08-14T16:34:56+00:00",""" +
+            """"listing":{"id":"1","type":"bot","name":"Bot","url":"https://thediscordlist.com/bots/1"},""" +
+            """"data":{"ready_at":"2026-08-14T16:34:56+00:00"}}"""
+
+        assertEquals(
+            WebhookData.ListingBumpReady(readyAt = "2026-08-14T16:34:56+00:00"),
+            verify(bumpReady, "t=$t,v1=${sign(bumpReady)}").payload,
         )
     }
 }
