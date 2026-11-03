@@ -122,6 +122,16 @@ class HttpTest {
     }
 
     @Test
+    fun `a throttled heartbeat leaves stats and commands alone`(): Unit = runBlocking {
+        val api = client()
+        respond = { it.send(429, "", mapOf("Retry-After" to "120")) }
+        assertIs<Outcome.Throttled>(api.post("/bots/1/heartbeat", stats, heartbeat = true))
+
+        respond = { it.send(200, "{}") }
+        assertIs<Outcome.Ok>(api.post("/bots/1/stats", stats, heartbeat = false))
+    }
+
+    @Test
     fun `suspends for 60 seconds when a 429 names no window`(): Unit = runBlocking {
         val api = client()
         respond = { it.send(429) }

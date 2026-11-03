@@ -99,7 +99,7 @@ internal class ApiClient(
             403 -> Outcome.Plan
             // 404 is "unknown id, or the id belongs to a server listing". Never "bad token".
             404, 409 -> Outcome.Config(status)
-            429 -> throttle(reply)
+            429 -> throttle(reply, heartbeat)
             408, 425, in 500..599 -> Outcome.Transient(status, "TheDiscordList responded $status.")
             else -> Outcome.Payload(status)
         }
@@ -107,13 +107,14 @@ internal class ApiClient(
 
     fun close() = transport.close()
 
-    private fun throttle(reply: HttpReply): Outcome.Throttled {
+    private fun throttle(reply: HttpReply, heartbeat: Boolean): Outcome.Throttled {
         val retryAfterMs = reply.header("Retry-After")?.toDoubleOrNull()?.takeIf { it > 0 }
             ?.let { (it * 1000).roundToLong() } ?: 60_000L
         // The reset is a wall-clock epoch, so only the time left until it carries over to the monotonic clock.
         val untilResetMs = reply.header("X-RateLimit-Reset")?.toLongOrNull()?.takeIf { it > 0 }
             ?.let { it * 1000 - System.currentTimeMillis() } ?: 0L
-        suspendedUntil = now() + min(max(retryAfterMs, untilResetMs), MAX_RETRY_AFTER_MS) + random.nextLong(0, 2_001)
+        // The server limits heartbeats apart from stats and commands, so one says nothing about the other.
+        if (!heartbeat) suspendedUntil = now() + min(max(retryAfterMs, untilResetMs), MAX_RETRY_AFTER_MS) + random.nextLong(0, 2_001)
         return Outcome.Throttled(retryAfterMs)
     }
 }
