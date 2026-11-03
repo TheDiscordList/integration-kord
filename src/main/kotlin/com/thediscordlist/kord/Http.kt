@@ -49,7 +49,7 @@ internal sealed interface Outcome {
     data object Auth : Outcome
     data object Plan : Outcome
     data class Config(val status: Int) : Outcome
-    data class Throttled(val retryAfterMs: Long) : Outcome
+    data class Throttled(val waitMs: Long) : Outcome
     data class Transient(val status: Int?, val message: String) : Outcome
     data object Dropped : Outcome
 }
@@ -113,8 +113,9 @@ internal class ApiClient(
         // The reset is a wall-clock epoch, so only the time left until it carries over to the monotonic clock.
         val untilResetMs = reply.header("X-RateLimit-Reset")?.toLongOrNull()?.takeIf { it > 0 }
             ?.let { it * 1000 - System.currentTimeMillis() } ?: 0L
+        val waitMs = min(max(retryAfterMs, untilResetMs), MAX_RETRY_AFTER_MS) + random.nextLong(0, 2_001)
         // The server limits heartbeats apart from stats and commands, so one says nothing about the other.
-        if (!heartbeat) suspendedUntil = now() + min(max(retryAfterMs, untilResetMs), MAX_RETRY_AFTER_MS) + random.nextLong(0, 2_001)
-        return Outcome.Throttled(retryAfterMs)
+        if (!heartbeat) suspendedUntil = now() + waitMs
+        return Outcome.Throttled(waitMs)
     }
 }

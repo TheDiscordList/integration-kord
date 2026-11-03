@@ -284,16 +284,21 @@ internal abstract class Publisher(protected val engine: Engine, val type: Publis
     }
 
     /**
-     * Retries only transient failures. A backoff that would outlast the next tick is dropped
-     * instead: the next tick carries fresher data, and a failed request still burns budget.
+     * Retries transient failures and, once its window lifts, a 429. A wait that would outlast the
+     * next tick is dropped instead: the next tick carries fresher data, and a failed request still
+     * burns budget.
      */
     protected suspend fun send(path: String, body: JsonElement, heartbeat: Boolean, nextTickInMs: Long?): PostResult {
         var outcome: Outcome = Outcome.Dropped
         for (attempt in 0 until MAX_ATTEMPTS) {
-            outcome = engine.api.post(path, body, heartbeat)
-            if (outcome !is Outcome.Transient || attempt == MAX_ATTEMPTS - 1) break
-            val wait = backoffMs(attempt, engine.random)
-            if (nextTickInMs != null && wait >= nextTickInMs) break
+            val current = engine.api.post(path, body, heartbeat)
+            outcome = current
+            val wait = when (current) {
+                is Outcome.Throttled -> current.waitMs
+                is Outcome.Transient -> backoffMs(attempt, engine.random)
+                else -> break
+            }
+            if (attempt == MAX_ATTEMPTS - 1 || (nextTickInMs != null && wait >= nextTickInMs)) break
             delay(wait)
         }
         return react(outcome)

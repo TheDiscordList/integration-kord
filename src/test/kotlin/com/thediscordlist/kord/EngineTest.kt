@@ -246,7 +246,9 @@ class EngineTest {
     @Test
     fun `a 429 suspends stats and commands together while heartbeats keep beating`() = runTest {
         val h = harness(FakeView(commands = commandList))
-        h.transport.respond = { if (it.path.endsWith("/stats")) reply(429, headers = mapOf("Retry-After" to "120")) else reply(200) }
+        h.transport.respond = {
+            if (it.path.endsWith("/stats") && h.transport.to("stats").size == 1) reply(429, headers = mapOf("Retry-After" to "120")) else reply(200)
+        }
         h.started()
         h.engine.onReady(0, listOf(1UL))
         advanceTimeBy(5_001)
@@ -259,6 +261,36 @@ class EngineTest {
 
         advanceTimeBy(30_000)
         assertEquals(PostResult(true, 200), h.engine.postCommands())
+    }
+
+    @Test
+    fun `retries a 429 once its window lifts, when that lands before the next tick`() = runTest {
+        val h = harness()
+        h.transport.respond = {
+            if (it.path.endsWith("/stats") && h.transport.to("stats").size == 1) reply(429, headers = mapOf("Retry-After" to "60")) else reply(200)
+        }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(5_001)
+        assertEquals(1, h.transport.to("stats").size)
+        advanceTimeBy(59_000)
+        assertEquals(1, h.transport.to("stats").size)
+        advanceTimeBy(4_000)
+        assertEquals(2, h.transport.to("stats").size)
+        assertTrue(TdlEvent.Posted(PublisherType.STATS, 200) in h.events)
+    }
+
+    @Test
+    fun `leaves a 429 to the next tick when its window outlasts it`() = runTest {
+        val h = harness()
+        h.transport.respond = { if (it.path.endsWith("/stats")) reply(429, headers = mapOf("Retry-After" to "600")) else reply(200) }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(600_000)
+
+        assertEquals(1, h.transport.to("stats").size)
     }
 
     @Test
