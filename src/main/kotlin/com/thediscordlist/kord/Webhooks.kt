@@ -137,7 +137,8 @@ private val webhookJson = Json { ignoreUnknownKeys = true }
  * [rawBody] must be the exact bytes that arrived. Re-serialising a parsed body can never verify:
  * the signature covers bytes, not meaning.
  *
- * @throws TdlWebhookException and nothing else; [TdlWebhookException.code] says why.
+ * @throws TdlWebhookException when the delivery fails; [TdlWebhookException.code] says why.
+ * @throws IllegalArgumentException when [secret] is blank: a misconfiguration, not a bad delivery.
  */
 public fun verifyWebhook(
     rawBody: ByteArray,
@@ -146,6 +147,7 @@ public fun verifyWebhook(
     tolerance: Duration = 5.minutes,
     nowEpochSeconds: Long = Instant.now().epochSecond,
 ): WebhookEvent {
+    require(secret.isNotBlank()) { "A webhook secret is required." }
     if (signatureHeader.isNullOrBlank()) {
         throw TdlWebhookException(WebhookErrorCode.MISSING_SIGNATURE, "Missing $WEBHOOK_SIGNATURE_HEADER header.")
     }
@@ -175,9 +177,6 @@ public fun verifyWebhook(
         throw TdlWebhookException(WebhookErrorCode.STALE_TIMESTAMP, "Webhook timestamp outside the tolerance window.")
     }
 
-    if (secret.isBlank()) {
-        throw TdlWebhookException(WebhookErrorCode.INVALID_SIGNATURE, "The webhook secret is blank.")
-    }
     val mac = Mac.getInstance("HmacSHA256")
     mac.init(SecretKeySpec(secret.toByteArray(), "HmacSHA256"))
     mac.update("$timestamp.".toByteArray())
