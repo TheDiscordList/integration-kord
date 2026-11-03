@@ -15,7 +15,10 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class EngineTest {
@@ -154,6 +157,45 @@ class EngineTest {
 
         assertEquals(PostResult(false, null, "min-gap"), h.engine.postStats())
         assertEquals(1, h.transport.to("stats").size)
+    }
+
+    @Test
+    fun `a minGap below the floor still holds stats posts 60 seconds apart`() = runTest {
+        val h = harness { stats { minGap = Duration.ZERO } }.started()
+        h.engine.onReady(0, listOf(1UL))
+        advanceTimeBy(10_000)
+
+        assertEquals(PostResult(false, null, "min-gap"), h.engine.postStats())
+        assertEquals(1, h.transport.to("stats").size)
+    }
+
+    @Test
+    fun `a zero stats interval cannot spin`() = runTest {
+        var measured = 0
+        val h = harness {
+            stats { interval = Duration.ZERO }
+            serverCount = { 1.also { measured++ } }
+        }.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10 * 60_000)
+
+        assertTrue(measured in 1..11, "measured $measured times")
+    }
+
+    @Test
+    fun `clamps the starting heartbeat interval`() = runTest {
+        val fast = harness { heartbeat { interval = 1.seconds } }.started()
+        val slow = harness { heartbeat { interval = 1.hours } }.started()
+        runCurrent()
+
+        advanceTimeBy(14_999)
+        assertEquals(1, fast.transport.to("heartbeat").size)
+        advanceTimeBy(5_002)
+        assertEquals(2, fast.transport.to("heartbeat").size)
+
+        advanceTimeBy(45_000)
+        assertTrue(slow.transport.to("heartbeat").size >= 2)
     }
 
     @Test

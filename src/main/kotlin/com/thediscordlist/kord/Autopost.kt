@@ -70,19 +70,21 @@ public data class Cluster(public val id: Int, public val count: Int)
 
 public class StatsOptions {
     public var enabled: Boolean = true
+
+    /** Never below [minGap]. */
     public var interval: Duration = 5.minutes
 
     /** Trailing debounce after a guild join or leave. */
     public var debounce: Duration = 20.seconds
 
-    /** Hard floor between two stats POSTs, manual posts included. */
+    /** Hard floor between two stats POSTs, manual posts included. Never below 60 seconds. */
     public var minGap: Duration = 60.seconds
 }
 
 public class HeartbeatOptions {
     public var enabled: Boolean = true
 
-    /** Starting cadence; the API's `next_beat_within_seconds` retunes it. */
+    /** Starting cadence, clamped to 15-60 seconds; the API's `next_beat_within_seconds` retunes it. */
     public var interval: Duration = 30.seconds
 }
 

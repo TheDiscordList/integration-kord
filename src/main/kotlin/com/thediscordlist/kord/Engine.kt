@@ -29,6 +29,7 @@ import kotlin.time.Duration
 
 internal const val STATS_FIRST_POST_DELAY_MS = 5_000L
 internal const val STATS_REMEASURE_MS = 60_000L
+internal const val STATS_MIN_GAP_MS = 60_000L
 
 /** Republish an unchanged count this often, so a listing never looks abandoned. */
 internal const val STATS_FORCE_AFTER_MS = 1_800_000L
@@ -343,9 +344,11 @@ internal abstract class Publisher(protected val engine: Engine, val type: Publis
 }
 
 internal class StatsPublisher(engine: Engine, options: StatsOptions) : Publisher(engine, PublisherType.STATS) {
-    private val interval = options.interval.inWholeMilliseconds
+    private val minGap = maxOf(options.minGap.inWholeMilliseconds, STATS_MIN_GAP_MS)
+
+    /** An interval under the gap would spin between the floor and the unchanged-count skip. */
+    private val interval = maxOf(options.interval.inWholeMilliseconds, minGap)
     private val debounce = options.debounce.inWholeMilliseconds
-    private val minGap = options.minGap.inWholeMilliseconds
 
     private var lastPostAt: Long? = null
     private var lastCount: Int? = null
@@ -444,7 +447,7 @@ internal class StatsPublisher(engine: Engine, options: StatsOptions) : Publisher
 }
 
 internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : Publisher(engine, PublisherType.HEARTBEAT) {
-    private var interval = options.interval.inWholeMilliseconds
+    private var interval = clamp(options.interval.inWholeMilliseconds)
     private var inFlight = false
     private var lastBeatAt: Long? = null
 
@@ -518,11 +521,13 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
         if (outcome is Outcome.Ok) {
             val seconds = ((outcome.body as? JsonObject)?.get("next_beat_within_seconds") as? JsonPrimitive)?.doubleOrNull
             if (seconds != null && seconds > 0) {
-                interval = (seconds / 3 * 1000).roundToLong().coerceIn(HEARTBEAT_MIN_INTERVAL_MS, HEARTBEAT_MAX_INTERVAL_MS)
+                interval = clamp((seconds / 3 * 1000).roundToLong())
             }
         }
         return super.react(outcome)
     }
+
+    private fun clamp(intervalMs: Long) = intervalMs.coerceIn(HEARTBEAT_MIN_INTERVAL_MS, HEARTBEAT_MAX_INTERVAL_MS)
 }
 
 internal class CommandsPublisher(engine: Engine, private val options: CommandsOptions) : Publisher(engine, PublisherType.COMMANDS) {
