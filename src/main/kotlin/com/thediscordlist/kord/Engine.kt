@@ -450,6 +450,7 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
     private var interval = clamp(options.interval.inWholeMilliseconds)
     private var inFlight = false
     private var lastBeatAt: Long? = null
+    private var beatNowPending = false
 
     fun start() {
         // Every beat hard-deletes the cluster rows with an id >= its cluster_count. A process that
@@ -468,11 +469,13 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
     }
 
     /**
-     * Out-of-band beat after a shard transition, at least 10 seconds after the previous one.
-     * Calls within a second coalesce.
+     * Out-of-band beat after a shard transition, at least 10 seconds after the previous one. Calls
+     * before it fires coalesce into it: moving it back on each would let a long burst starve the
+     * heartbeat past the server's grace window.
      */
     fun beatNow() {
-        if (disabledReason != null || engine.topology.clusterCount == null || engine.now() < suspendedUntil) return
+        if (disabledReason != null || beatNowPending || engine.topology.clusterCount == null || engine.now() < suspendedUntil) return
+        beatNowPending = true
         val earliest = lastBeatAt?.plus(HEARTBEAT_OUT_OF_BAND_GAP_MS) ?: 0L
         schedule(maxOf(earliest - engine.now(), 1_000L)) { beat(manual = false) }
     }
@@ -484,6 +487,7 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
     }
 
     private suspend fun beat(manual: Boolean): PostResult {
+        beatNowPending = false
         if (!manual && disabledReason != null) return skipped("disabled")
         if (inFlight) return skipped("in-flight")
         val clusterCount = engine.topology.clusterCount ?: return skipped("cluster-count-unknown")

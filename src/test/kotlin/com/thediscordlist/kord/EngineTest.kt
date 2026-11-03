@@ -94,6 +94,19 @@ class EngineTest {
     }
 
     @Test
+    fun `a steady stream of shard transitions cannot starve the heartbeat`() = runTest {
+        val h = harness().started()
+        runCurrent()
+
+        repeat(120) {
+            h.engine.onShardStatus(0, if (it % 2 == 0) ShardStatus.RESUMING else ShardStatus.READY)
+            advanceTimeBy(500)
+        }
+
+        assertTrue(h.transport.to("heartbeat").size >= 3)
+    }
+
+    @Test
     fun `retunes the heartbeat cadence from next_beat_within_seconds`() = runTest {
         val h = harness()
         h.transport.respond = { reply(200, """{"cluster":0,"status":"up","shard_count":1,"next_beat_within_seconds":150}""") }
