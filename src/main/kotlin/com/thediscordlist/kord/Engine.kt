@@ -45,7 +45,7 @@ internal const val COMMANDS_RETRY_MS = 300_000L
 /** The Gold tier is derived per request, so a bot can gain it mid-run. */
 internal const val PLAN_REPROBE_MS = 1_800_000L
 internal const val MAX_LATENCY_MS = 600_000L
-private const val MAX_ATTEMPTS = 3
+internal const val MAX_ATTEMPTS = 3
 
 internal val logger: System.Logger = System.getLogger("com.thediscordlist.kord")
 
