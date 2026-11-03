@@ -280,7 +280,7 @@ Each release:
 
 1. Set `version` in `gradle.properties` and move the `CHANGELOG.md` entry under it.
 2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. `release.yml` checks that the tag matches `version`, builds, signs and runs
+3. `release.yml` checks that the tag is on `main` and matches `version`, builds, signs and runs
    `publishAndReleaseToMavenCentral`. The artifact is searchable on Maven
    Central within about 30 minutes.
 
