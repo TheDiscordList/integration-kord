@@ -36,9 +36,16 @@ internal class FakeView(
     override val totalShards: Int = localShards.size,
     private val pings: Map<Int, Duration> = emptyMap(),
     var commands: JsonArray = JsonArray(emptyList()),
+    var commandsFailure: Exception? = null,
 ) : BotView {
     override fun latency(shard: Int): Duration? = pings[shard]
-    override suspend fun fetchCommands(): JsonArray = commands
+    override suspend fun fetchCommands(): JsonArray {
+        commandsFailure?.let {
+            commandsFailure = null
+            throw it
+        }
+        return commands
+    }
 }
 
 internal fun json(text: String): JsonObject = Json.parseToJsonElement(text).jsonObject

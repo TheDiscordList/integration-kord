@@ -342,6 +342,58 @@ class EngineTest {
     }
 
     @Test
+    fun `retries commands every 5 minutes after a 5xx until they land`() = runTest {
+        val h = harness(FakeView(commands = commandList))
+        h.transport.respond = { if (it.path.endsWith("/commands") && h.transport.to("commands").size <= 3) reply(503) else reply(200) }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10_001 + 3_100)
+        assertEquals(3, h.transport.to("commands").size)
+        advanceTimeBy(COMMANDS_RETRY_MS)
+        assertEquals(4, h.transport.to("commands").size)
+        advanceTimeBy(COMMANDS_RETRY_MS * 3)
+        assertEquals(4, h.transport.to("commands").size)
+    }
+
+    @Test
+    fun `retries commands after a failed fetch from Discord`() = runTest {
+        val h = harness(FakeView(commands = commandList, commandsFailure = IllegalStateException("Discord is down"))).started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10_001)
+        assertEquals(0, h.transport.to("commands").size)
+        assertTrue(h.events.filterIsInstance<TdlEvent.Failed>().single().retryable)
+        advanceTimeBy(COMMANDS_RETRY_MS)
+        assertEquals(1, h.transport.to("commands").size)
+    }
+
+    @Test
+    fun `retries commands dropped by a suspension`() = runTest {
+        val h = harness(FakeView(commands = commandList))
+        h.transport.respond = { if (it.path.endsWith("/stats") && h.transport.to("stats").size == 1) reply(429, headers = mapOf("Retry-After" to "60")) else reply(200) }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10_001)
+        assertEquals(0, h.transport.to("commands").size)
+        advanceTimeBy(COMMANDS_RETRY_MS)
+        assertEquals(1, h.transport.to("commands").size)
+    }
+
+    @Test
+    fun `never retries commands the API rejected`() = runTest {
+        val h = harness(FakeView(commands = commandList))
+        h.transport.respond = { if (it.path.endsWith("/commands")) reply(422) else reply(200) }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10_001 + COMMANDS_RETRY_MS * 3)
+
+        assertEquals(1, h.transport.to("commands").size)
+    }
+
+    @Test
     fun `does not heartbeat when the cluster count is unknown`() = runTest {
         val h = harness(FakeView(localShards = listOf(0, 1), totalShards = 4)).started()
         runCurrent()

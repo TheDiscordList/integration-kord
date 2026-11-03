@@ -39,6 +39,7 @@ internal const val HEARTBEAT_OUT_OF_BAND_GAP_MS = 10_000L
 
 /** Offset from the first stats post: the two share one server-side rate budget. */
 internal const val COMMANDS_DELAY_MS = 10_000L
+internal const val COMMANDS_RETRY_MS = 300_000L
 
 /** The Gold tier is derived per request, so a bot can gain it mid-run. */
 internal const val PLAN_REPROBE_MS = 1_800_000L
@@ -267,8 +268,12 @@ internal abstract class Publisher(protected val engine: Engine, val type: Publis
         }
     }
 
-    fun disable(status: Int?, reason: String, quiet: Boolean = false) {
+    protected fun clear() {
         timer?.cancel()
+    }
+
+    fun disable(status: Int?, reason: String, quiet: Boolean = false) {
+        clear()
         if (disabledReason != null) return
         disabledReason = reason
         engine.emit(TdlEvent.Disabled(type, status, reason), quiet)
@@ -288,7 +293,7 @@ internal abstract class Publisher(protected val engine: Engine, val type: Publis
      * next tick is dropped instead: the next tick carries fresher data, and a failed request still
      * burns budget.
      */
-    protected suspend fun send(path: String, body: JsonElement, heartbeat: Boolean, nextTickInMs: Long?): PostResult {
+    protected suspend fun send(path: String, body: JsonElement, heartbeat: Boolean, nextTickInMs: Long): PostResult {
         var outcome: Outcome = Outcome.Dropped
         for (attempt in 0 until MAX_ATTEMPTS) {
             val current = engine.api.post(path, body, heartbeat)
@@ -298,7 +303,7 @@ internal abstract class Publisher(protected val engine: Engine, val type: Publis
                 is Outcome.Transient -> backoffMs(attempt, engine.random)
                 else -> break
             }
-            if (attempt == MAX_ATTEMPTS - 1 || (nextTickInMs != null && wait >= nextTickInMs)) break
+            if (attempt == MAX_ATTEMPTS - 1 || wait >= nextTickInMs) break
             delay(wait)
         }
         return react(outcome)
@@ -521,7 +526,9 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
 }
 
 internal class CommandsPublisher(engine: Engine, private val options: CommandsOptions) : Publisher(engine, PublisherType.COMMANDS) {
-    /** Once after ready. Commands change on deploy, and a deploy is a restart. */
+    private var inFlight = false
+
+    /** One success is enough. Commands change on deploy, and a deploy is a restart. */
     fun start() {
         if (disabledReason == null && engine.topology.isStatsPublisher) schedule(COMMANDS_DELAY_MS) { publish() }
     }
@@ -533,20 +540,45 @@ internal class CommandsPublisher(engine: Engine, private val options: CommandsOp
 
     private suspend fun publish(): PostResult {
         if (disabledReason != null) return skipped("disabled")
-        if (engine.now() < suspendedUntil) return skipped("plan")
-
-        val commands = try {
-            engine.fetchCommands()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            engine.emit(TdlEvent.Failed(type, null, false, "Could not fetch the global commands from Discord: ${e.message}"))
-            return skipped("fetch-failed")
+        if (inFlight) return skipped("in-flight")
+        clear()
+        if (engine.now() < suspendedUntil) {
+            retryLater()
+            return skipped("plan")
         }
 
-        // An empty array CLEARS the listing's commands, so it is never sent by accident.
-        if (commands.isEmpty() && !options.postEmpty) return skipped("empty")
+        inFlight = true
+        try {
+            val commands = try {
+                engine.fetchCommands()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                engine.emit(TdlEvent.Failed(type, null, true, "Could not fetch the global commands from Discord: ${e.message}"))
+                retryLater()
+                return skipped("fetch-failed")
+            }
 
-        return send("/bots/${engine.botId}/commands", buildJsonObject { put("commands", commands) }, heartbeat = false, nextTickInMs = null)
+            // An empty array CLEARS the listing's commands, so it is never sent by accident.
+            if (commands.isEmpty() && !options.postEmpty) return skipped("empty")
+
+            return send("/bots/${engine.botId}/commands", buildJsonObject { put("commands", commands) }, heartbeat = false, nextTickInMs = COMMANDS_RETRY_MS)
+        } finally {
+            inFlight = false
+        }
+    }
+
+    /** Nothing else will post these until the next deploy, so everything short of a rejection is tried again. */
+    override fun react(outcome: Outcome): PostResult {
+        val result = super.react(outcome)
+        when (outcome) {
+            is Outcome.Transient, is Outcome.Throttled, Outcome.Dropped, Outcome.Plan -> retryLater()
+            else -> Unit
+        }
+        return result
+    }
+
+    private fun retryLater() {
+        schedule(maxOf(COMMANDS_RETRY_MS, suspendedUntil - engine.now())) { publish() }
     }
 }
