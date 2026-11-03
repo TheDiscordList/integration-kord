@@ -138,7 +138,7 @@ class KordWiringTest {
             assertEquals(
                 json(
                     """{"cluster":0,"cluster_count":1,"shards":[""" +
-                        """{"id":0,"status":"connecting","latency_ms":42,"guilds":0},{"id":1,"status":"connecting","guilds":0}]}""",
+                        """{"id":0,"status":"connecting","latency_ms":42},{"id":1,"status":"connecting"}]}""",
                 ),
                 boot.body,
             )
@@ -161,7 +161,7 @@ class KordWiringTest {
             assertEquals(
                 json(
                     """{"cluster":0,"cluster_count":1,"shards":[""" +
-                        """{"id":0,"status":"resuming","latency_ms":42,"guilds":2},{"id":1,"status":"ready","guilds":0}]}""",
+                        """{"id":0,"status":"resuming","latency_ms":42},{"id":1,"status":"ready","guilds":0}]}""",
                 ),
                 transport.to("heartbeat").last().body,
             )

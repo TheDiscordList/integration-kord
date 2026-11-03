@@ -195,13 +195,15 @@ internal class Engine(
         val guildsPerShard = guildShards.values.groupingBy { it }.eachCount()
         return JsonArray(
             view.localShards.map { id ->
+                val status = shardStatus[id] ?: ShardStatus.CONNECTING
                 buildJsonObject {
                     put("id", id)
-                    put("status", (shardStatus[id] ?: ShardStatus.CONNECTING).wire)
+                    put("status", status.wire)
                     // The API floor is 0 and its ceiling ten minutes; no reading means no key.
                     view.latency(id)?.inWholeMilliseconds?.takeIf { it >= 0 }
                         ?.let { put("latency_ms", min(it, MAX_LATENCY_MS)) }
-                    put("guilds", guildsPerShard[id] ?: 0)
+                    // A count from a shard that is not ready is partial at best, and the API forwards it to the public listing.
+                    if (status == ShardStatus.READY) put("guilds", guildsPerShard[id] ?: 0)
                 }
             },
         )

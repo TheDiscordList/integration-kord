@@ -51,11 +51,11 @@ class EngineTest {
 
         val beat = h.transport.to("heartbeat").single()
         assertEquals("/bots/123/heartbeat", beat.path)
-        assertEquals(json("""{"cluster":0,"cluster_count":1,"shards":[{"id":0,"status":"connecting","guilds":0}]}"""), beat.body)
+        assertEquals(json("""{"cluster":0,"cluster_count":1,"shards":[{"id":0,"status":"connecting"}]}"""), beat.body)
     }
 
     @Test
-    fun `heartbeat reports status, latency and guilds per shard, and omits an unknown latency`() = runTest {
+    fun `heartbeat reports status, latency and guilds per shard, and omits what it cannot know`() = runTest {
         val h = harness(FakeView(localShards = listOf(0, 1), pings = mapOf(0 to 42.milliseconds))).started()
         runCurrent()
         h.engine.onReady(0, listOf(1UL, 2UL))
@@ -64,7 +64,7 @@ class EngineTest {
         assertEquals(
             json(
                 """{"cluster":0,"cluster_count":1,"shards":[""" +
-                    """{"id":0,"status":"ready","latency_ms":42,"guilds":2},{"id":1,"status":"connecting","guilds":0}]}""",
+                    """{"id":0,"status":"ready","latency_ms":42,"guilds":2},{"id":1,"status":"connecting"}]}""",
             ),
             h.transport.to("heartbeat").last().body,
         )
@@ -347,7 +347,7 @@ class EngineTest {
         advanceTimeBy(60_000)
 
         val beat = h.transport.to("heartbeat").first().body
-        assertEquals(json("""{"cluster":1,"cluster_count":2,"shards":[{"id":2,"status":"connecting","guilds":0},{"id":3,"status":"connecting","guilds":0}]}"""), beat)
+        assertEquals(json("""{"cluster":1,"cluster_count":2,"shards":[{"id":2,"status":"connecting"},{"id":3,"status":"connecting"}]}"""), beat)
         assertEquals(0, h.transport.to("stats").size + h.transport.to("commands").size)
         assertEquals(PostResult(false, null, "not-elected"), h.engine.postStats())
     }
