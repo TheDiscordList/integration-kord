@@ -418,8 +418,7 @@ internal class StatsPublisher(engine: Engine, options: StatsOptions) : Publisher
             }
 
             val shardCount = engine.topology.shardCount
-            // Every stats post re-indexes the listing and fires a webhook even when nothing moved,
-            // and the server does not dedupe, so the skip has to happen here.
+            // The server treats a count that did not move as no news, so re-sending one only spends rate budget.
             if (count == lastCount && shardCount == lastShardCount && last != null &&
                 engine.now() < last + STATS_FORCE_AFTER_MS
             ) {
