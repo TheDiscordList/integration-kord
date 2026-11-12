@@ -23,7 +23,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v5
+      - uses: gradle/actions/setup-gradle@v6
       - name: Tag matches the project version
         run: test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version=//p' gradle.properties)"
       - run: ./gradlew build
