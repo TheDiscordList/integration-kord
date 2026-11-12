@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 - 2026-11-03
+## 0.2.1 - 2026-11-12
 
 - A shard leaves `guilds` out of its heartbeat until it is ready, so a restart's
   first beat cannot zero the listing's server count.
@@ -17,6 +17,9 @@
 - `verifyWebhook` throws `IllegalArgumentException` for a blank secret before
   looking at the delivery, so a misconfiguration no longer reads as bad
   deliveries.
+- Built with Gradle 9.9.0, tested with kotlinx-coroutines-test 1.11.0, and CI's
+  actions are on their latest releases. The published dependencies are
+  unchanged.
 
 ## 0.2.0 - 2026-10-18
 
