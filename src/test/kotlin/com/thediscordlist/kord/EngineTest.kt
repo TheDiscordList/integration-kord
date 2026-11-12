@@ -15,7 +15,10 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class EngineTest {
@@ -51,11 +54,11 @@ class EngineTest {
 
         val beat = h.transport.to("heartbeat").single()
         assertEquals("/bots/123/heartbeat", beat.path)
-        assertEquals(json("""{"cluster":0,"cluster_count":1,"shards":[{"id":0,"status":"connecting","guilds":0}]}"""), beat.body)
+        assertEquals(json("""{"cluster":0,"cluster_count":1,"shards":[{"id":0,"status":"connecting"}]}"""), beat.body)
     }
 
     @Test
-    fun `heartbeat reports status, latency and guilds per shard, and omits an unknown latency`() = runTest {
+    fun `heartbeat reports status, latency and guilds per shard, and omits what it cannot know`() = runTest {
         val h = harness(FakeView(localShards = listOf(0, 1), pings = mapOf(0 to 42.milliseconds))).started()
         runCurrent()
         h.engine.onReady(0, listOf(1UL, 2UL))
@@ -64,7 +67,7 @@ class EngineTest {
         assertEquals(
             json(
                 """{"cluster":0,"cluster_count":1,"shards":[""" +
-                    """{"id":0,"status":"ready","latency_ms":42,"guilds":2},{"id":1,"status":"connecting","guilds":0}]}""",
+                    """{"id":0,"status":"ready","latency_ms":42,"guilds":2},{"id":1,"status":"connecting"}]}""",
             ),
             h.transport.to("heartbeat").last().body,
         )
@@ -88,6 +91,19 @@ class EngineTest {
         val beats = h.transport.to("heartbeat")
         assertEquals(2, beats.size)
         assertEquals(json("""{"id":0,"status":"ready","guilds":0}"""), (beats.last().body["shards"] as JsonArray).single())
+    }
+
+    @Test
+    fun `a steady stream of shard transitions cannot starve the heartbeat`() = runTest {
+        val h = harness().started()
+        runCurrent()
+
+        repeat(120) {
+            h.engine.onShardStatus(0, if (it % 2 == 0) ShardStatus.RESUMING else ShardStatus.READY)
+            advanceTimeBy(500)
+        }
+
+        assertTrue(h.transport.to("heartbeat").size >= 3)
     }
 
     @Test
@@ -154,6 +170,45 @@ class EngineTest {
 
         assertEquals(PostResult(false, null, "min-gap"), h.engine.postStats())
         assertEquals(1, h.transport.to("stats").size)
+    }
+
+    @Test
+    fun `a minGap below the floor still holds stats posts 60 seconds apart`() = runTest {
+        val h = harness { stats { minGap = Duration.ZERO } }.started()
+        h.engine.onReady(0, listOf(1UL))
+        advanceTimeBy(10_000)
+
+        assertEquals(PostResult(false, null, "min-gap"), h.engine.postStats())
+        assertEquals(1, h.transport.to("stats").size)
+    }
+
+    @Test
+    fun `a zero stats interval cannot spin`() = runTest {
+        var measured = 0
+        val h = harness {
+            stats { interval = Duration.ZERO }
+            serverCount = { 1.also { measured++ } }
+        }.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10 * 60_000)
+
+        assertTrue(measured in 1..11, "measured $measured times")
+    }
+
+    @Test
+    fun `clamps the starting heartbeat interval`() = runTest {
+        val fast = harness { heartbeat { interval = 1.seconds } }.started()
+        val slow = harness { heartbeat { interval = 1.hours } }.started()
+        runCurrent()
+
+        advanceTimeBy(14_999)
+        assertEquals(1, fast.transport.to("heartbeat").size)
+        advanceTimeBy(5_002)
+        assertEquals(2, fast.transport.to("heartbeat").size)
+
+        advanceTimeBy(45_000)
+        assertTrue(slow.transport.to("heartbeat").size >= 2)
     }
 
     @Test
@@ -246,7 +301,9 @@ class EngineTest {
     @Test
     fun `a 429 suspends stats and commands together while heartbeats keep beating`() = runTest {
         val h = harness(FakeView(commands = commandList))
-        h.transport.respond = { if (it.path.endsWith("/stats")) reply(429, headers = mapOf("Retry-After" to "120")) else reply(200) }
+        h.transport.respond = {
+            if (it.path.endsWith("/stats") && h.transport.to("stats").size == 1) reply(429, headers = mapOf("Retry-After" to "120")) else reply(200)
+        }
         h.started()
         h.engine.onReady(0, listOf(1UL))
         advanceTimeBy(5_001)
@@ -259,6 +316,36 @@ class EngineTest {
 
         advanceTimeBy(30_000)
         assertEquals(PostResult(true, 200), h.engine.postCommands())
+    }
+
+    @Test
+    fun `retries a 429 once its window lifts, when that lands before the next tick`() = runTest {
+        val h = harness()
+        h.transport.respond = {
+            if (it.path.endsWith("/stats") && h.transport.to("stats").size == 1) reply(429, headers = mapOf("Retry-After" to "60")) else reply(200)
+        }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(5_001)
+        assertEquals(1, h.transport.to("stats").size)
+        advanceTimeBy(59_000)
+        assertEquals(1, h.transport.to("stats").size)
+        advanceTimeBy(4_000)
+        assertEquals(2, h.transport.to("stats").size)
+        assertTrue(TdlEvent.Posted(PublisherType.STATS, 200) in h.events)
+    }
+
+    @Test
+    fun `leaves a 429 to the next tick when its window outlasts it`() = runTest {
+        val h = harness()
+        h.transport.respond = { if (it.path.endsWith("/stats")) reply(429, headers = mapOf("Retry-After" to "600")) else reply(200) }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(600_000)
+
+        assertEquals(1, h.transport.to("stats").size)
     }
 
     @Test
@@ -310,6 +397,58 @@ class EngineTest {
     }
 
     @Test
+    fun `retries commands every 5 minutes after a 5xx until they land`() = runTest {
+        val h = harness(FakeView(commands = commandList))
+        h.transport.respond = { if (it.path.endsWith("/commands") && h.transport.to("commands").size <= 3) reply(503) else reply(200) }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10_001 + 3_100)
+        assertEquals(3, h.transport.to("commands").size)
+        advanceTimeBy(COMMANDS_RETRY_MS)
+        assertEquals(4, h.transport.to("commands").size)
+        advanceTimeBy(COMMANDS_RETRY_MS * 3)
+        assertEquals(4, h.transport.to("commands").size)
+    }
+
+    @Test
+    fun `retries commands after a failed fetch from Discord`() = runTest {
+        val h = harness(FakeView(commands = commandList, commandsFailure = IllegalStateException("Discord is down"))).started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10_001)
+        assertEquals(0, h.transport.to("commands").size)
+        assertTrue(h.events.filterIsInstance<TdlEvent.Failed>().single().retryable)
+        advanceTimeBy(COMMANDS_RETRY_MS)
+        assertEquals(1, h.transport.to("commands").size)
+    }
+
+    @Test
+    fun `retries commands dropped by a suspension`() = runTest {
+        val h = harness(FakeView(commands = commandList))
+        h.transport.respond = { if (it.path.endsWith("/stats") && h.transport.to("stats").size == 1) reply(429, headers = mapOf("Retry-After" to "60")) else reply(200) }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10_001)
+        assertEquals(0, h.transport.to("commands").size)
+        advanceTimeBy(COMMANDS_RETRY_MS)
+        assertEquals(1, h.transport.to("commands").size)
+    }
+
+    @Test
+    fun `never retries commands the API rejected`() = runTest {
+        val h = harness(FakeView(commands = commandList))
+        h.transport.respond = { if (it.path.endsWith("/commands")) reply(422) else reply(200) }
+        h.started()
+        h.engine.onReady(0, listOf(1UL))
+
+        advanceTimeBy(10_001 + COMMANDS_RETRY_MS * 3)
+
+        assertEquals(1, h.transport.to("commands").size)
+    }
+
+    @Test
     fun `does not heartbeat when the cluster count is unknown`() = runTest {
         val h = harness(FakeView(localShards = listOf(0, 1), totalShards = 4)).started()
         runCurrent()
@@ -347,7 +486,7 @@ class EngineTest {
         advanceTimeBy(60_000)
 
         val beat = h.transport.to("heartbeat").first().body
-        assertEquals(json("""{"cluster":1,"cluster_count":2,"shards":[{"id":2,"status":"connecting","guilds":0},{"id":3,"status":"connecting","guilds":0}]}"""), beat)
+        assertEquals(json("""{"cluster":1,"cluster_count":2,"shards":[{"id":2,"status":"connecting"},{"id":3,"status":"connecting"}]}"""), beat)
         assertEquals(0, h.transport.to("stats").size + h.transport.to("commands").size)
         assertEquals(PostResult(false, null, "not-elected"), h.engine.postStats())
     }

@@ -64,8 +64,14 @@ class WebhooksTest {
     @Test
     fun `rejects the wrong secret`() {
         assertRejected(WebhookErrorCode.INVALID_SIGNATURE) { verify(body, "t=$t,v1=${sign(body, secret = "whsec_other")}") }
-        assertRejected(WebhookErrorCode.INVALID_SIGNATURE) { verify(body, "t=$t,v1=${sign(body)}", secret = "") }
-        assertRejected(WebhookErrorCode.INVALID_SIGNATURE) { verify(body, "t=$t,v1=${sign(body, secret = " ")}", secret = " ") }
+    }
+
+    @Test
+    fun `a blank secret is a configuration error, whatever the delivery looks like`() {
+        assertFailsWith<IllegalArgumentException> { verify(body, "t=$t,v1=${sign(body)}", secret = "") }
+        assertFailsWith<IllegalArgumentException> { verify(body, "t=$t,v1=${sign(body, secret = " ")}", secret = " ") }
+        assertFailsWith<IllegalArgumentException> { verify(body, null, secret = "") }
+        assertFailsWith<IllegalArgumentException> { verify(body, "t=$t,v1=${sign(body)}", now = t + 301, secret = "") }
     }
 
     @Test

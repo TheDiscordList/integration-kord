@@ -10,7 +10,7 @@ No dependencies beyond Kord itself: HTTP is `java.net.http`, signatures are
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.thediscordlist:integration-kord:0.2.0")
+    implementation("com.thediscordlist:integration-kord:0.2.1")
 }
 ```
 
@@ -18,7 +18,7 @@ dependencies {
 <dependency>
   <groupId>com.thediscordlist</groupId>
   <artifactId>integration-kord</artifactId>
-  <version>0.2.0</version>
+  <version>0.2.1</version>
 </dependency>
 ```
 
@@ -44,7 +44,7 @@ It starts three publishers:
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after every shard is ready, then every 5 min, debounced on guild join/leave |
 | Heartbeat | per-shard status, latency and guild counts | immediately, then every ~30s, plus on any shard transition, at least 10s after the previous beat |
-| Commands | your registered global commands | once, ~10s after ready |
+| Commands | your registered global commands | once, ~10s after ready, then every 5 min until it lands |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
@@ -68,7 +68,8 @@ configuration at all:
 The guild ledger is built from gateway events: `READY` seeds it with every
 guild of the session (unavailable ones included, as on any bot list), joins and
 leaves adjust it, and an outage (`unavailable = true`) leaves it alone. It does
-not depend on Kord's cache settings.
+not depend on Kord's cache settings. A heartbeat leaves a shard's `guilds` out
+until that shard is ready, so a restart cannot zero the public count.
 
 When a process runs only some shards, for example
 `sharding { Shards(totalShards = 16, indices = 0..7) }`, Kord has no
@@ -120,10 +121,14 @@ kord.autopost(token) {
 }
 ```
 
-`minGap` is a hard floor between two stats POSTs. A join storm, a mass
-reconnect and a manual `postStats()` all route through it, so the ceiling is
-structurally one request per minute. An unchanged count is not re-sent for 30
+`minGap` is a hard floor between two stats POSTs, and it cannot be set below 60
+seconds. A join storm, a mass reconnect and a manual `postStats()` all route
+through it, so the ceiling is structurally one request per minute. `interval`
+never runs faster than `minGap`. An unchanged count is not re-sent for 30
 minutes.
+
+The heartbeat `interval` is clamped to 15-60 seconds, and the API's response
+retunes it from there.
 
 `commands.postEmpty` is `false` because posting an empty list **clears** the
 command list on your listing. Turn it on only if that is what you mean.
@@ -160,7 +165,9 @@ retry after fixing a token or a listing id without restarting.
 
 `verifyWebhook` needs no Kord client and no framework. It takes the raw body,
 the `X-TDL-Signature` header and your webhook secret, and returns the parsed
-event or throws a `TdlWebhookException` whose `code` says why.
+event or throws a `TdlWebhookException` whose `code` says why. A blank secret
+throws `IllegalArgumentException` instead: that is a misconfiguration, not a bad
+delivery.
 
 ### Ktor
 
@@ -232,16 +239,21 @@ heartbeat's internal stats forward.
   suspends and reprobes every 30 minutes rather than disabling: the plan is
   checked per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** The API counts stats and commands against one
-  budget per bot (60/min; heartbeats have their own 120/min). A `429`
-  suspends stats and commands together for `Retry-After` (or until
-  `X-RateLimit-Reset`, at most an hour); heartbeats keep beating, because a
-  stale number beats a false "down" on your status page.
+  budget per bot (60/min). A `429` suspends both for `Retry-After` (or until
+  `X-RateLimit-Reset`, at most an hour), and the request is retried once the
+  window lifts if that comes before its next run. Heartbeats have a separate
+  limit: a `429` on a beat holds back neither stats nor commands, and a `429` on
+  those holds back no beat, because a stale number beats a false "down" on your
+  status page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing, and it disables only the publisher that received it. A `401`
   is the bad-token signal, and it disables all three.
 - Transient failures (`408`, `425`, 5xx, timeouts, network) are retried twice
   with jittered exponential backoff, then left to the next run. Any other `4xx`
   is reported once and not retried.
+- **Commands are retried every 5 minutes** after a transient failure, a rate
+  limit or a failed fetch from Discord, until they land or the API rejects them.
+  A `403` re-probes every 30 minutes instead.
 - **Only global commands are published.** Guild-scoped commands are not part of
   a listing.
 - **Keep the `Guilds` intent.** Kord's default intents include it. Without it
@@ -279,8 +291,8 @@ One-time setup:
 Each release:
 
 1. Set `version` in `gradle.properties` and move the `CHANGELOG.md` entry under it.
-2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
-3. `release.yml` checks that the tag matches `version`, builds, signs and runs
+2. Commit, then tag and push: `git tag v0.2.1 && git push origin v0.2.1`.
+3. `release.yml` checks that the tag is on `main` and matches `version`, builds, signs and runs
    `publishAndReleaseToMavenCentral`. The artifact is searchable on Maven
    Central within about 30 minutes.
 

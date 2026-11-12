@@ -106,7 +106,7 @@ class HttpTest {
         val api = client()
         val resetAt = System.currentTimeMillis() / 1000 + 120
         respond = { it.send(429, "", mapOf("Retry-After" to "5", "X-RateLimit-Reset" to "$resetAt")) }
-        assertEquals(Outcome.Throttled(5_000), api.post("/bots/1/stats", stats, heartbeat = false))
+        assertIs<Outcome.Throttled>(api.post("/bots/1/stats", stats, heartbeat = false))
 
         respond = { it.send(200, "{}") }
         clock += 100_000
@@ -122,10 +122,20 @@ class HttpTest {
     }
 
     @Test
+    fun `a throttled heartbeat leaves stats and commands alone`(): Unit = runBlocking {
+        val api = client()
+        respond = { it.send(429, "", mapOf("Retry-After" to "120")) }
+        assertIs<Outcome.Throttled>(api.post("/bots/1/heartbeat", stats, heartbeat = true))
+
+        respond = { it.send(200, "{}") }
+        assertIs<Outcome.Ok>(api.post("/bots/1/stats", stats, heartbeat = false))
+    }
+
+    @Test
     fun `suspends for 60 seconds when a 429 names no window`(): Unit = runBlocking {
         val api = client()
         respond = { it.send(429) }
-        assertEquals(Outcome.Throttled(60_000), api.post("/bots/1/stats", stats, heartbeat = false))
+        assertTrue(assertIs<Outcome.Throttled>(api.post("/bots/1/stats", stats, heartbeat = false)).waitMs in 60_000..62_000)
 
         respond = { it.send(200, "{}") }
         clock += 59_000

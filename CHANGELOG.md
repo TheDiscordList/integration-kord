@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.1 - 2026-11-12
+
+- A shard leaves `guilds` out of its heartbeat until it is ready, so a restart's
+  first beat cannot zero the listing's server count.
+- A `429` is retried once its window lifts, when that comes before the next
+  run.
+- A `429` on a heartbeat no longer suspends stats and commands: the API limits
+  them separately.
+- Commands are retried every 5 minutes after a 5xx, a rate limit, a plan
+  suspension or a failed fetch from Discord, until they land or are rejected.
+- `minGap` cannot go below 60 seconds, `interval` cannot go below `minGap`, and
+  the starting heartbeat `interval` is clamped to 15-60 seconds.
+- A burst of shard transitions no longer pushes the out-of-band beat back, which
+  could starve heartbeats past the API's grace window.
+- `verifyWebhook` throws `IllegalArgumentException` for a blank secret before
+  looking at the delivery, so a misconfiguration no longer reads as bad
+  deliveries.
+- Built with Gradle 9.9.0, tested with kotlinx-coroutines-test 1.11.0, and CI's
+  actions are on their latest releases. The published dependencies are
+  unchanged.
+
 ## 0.2.0 - 2026-10-18
 
 - `WebhookData.ListingBumpReady` for `listing.bump_ready`, with `readyAt`.

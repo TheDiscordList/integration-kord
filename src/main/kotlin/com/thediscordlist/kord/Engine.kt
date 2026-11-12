@@ -29,6 +29,7 @@ import kotlin.time.Duration
 
 internal const val STATS_FIRST_POST_DELAY_MS = 5_000L
 internal const val STATS_REMEASURE_MS = 60_000L
+internal const val STATS_MIN_GAP_MS = 60_000L
 
 /** Republish an unchanged count this often, so a listing never looks abandoned. */
 internal const val STATS_FORCE_AFTER_MS = 1_800_000L
@@ -39,11 +40,12 @@ internal const val HEARTBEAT_OUT_OF_BAND_GAP_MS = 10_000L
 
 /** Offset from the first stats post: the two share one server-side rate budget. */
 internal const val COMMANDS_DELAY_MS = 10_000L
+internal const val COMMANDS_RETRY_MS = 300_000L
 
 /** The Gold tier is derived per request, so a bot can gain it mid-run. */
 internal const val PLAN_REPROBE_MS = 1_800_000L
 internal const val MAX_LATENCY_MS = 600_000L
-private const val MAX_ATTEMPTS = 3
+internal const val MAX_ATTEMPTS = 3
 
 internal val logger: System.Logger = System.getLogger("com.thediscordlist.kord")
 
@@ -195,13 +197,15 @@ internal class Engine(
         val guildsPerShard = guildShards.values.groupingBy { it }.eachCount()
         return JsonArray(
             view.localShards.map { id ->
+                val status = shardStatus[id] ?: ShardStatus.CONNECTING
                 buildJsonObject {
                     put("id", id)
-                    put("status", (shardStatus[id] ?: ShardStatus.CONNECTING).wire)
+                    put("status", status.wire)
                     // The API floor is 0 and its ceiling ten minutes; no reading means no key.
                     view.latency(id)?.inWholeMilliseconds?.takeIf { it >= 0 }
                         ?.let { put("latency_ms", min(it, MAX_LATENCY_MS)) }
-                    put("guilds", guildsPerShard[id] ?: 0)
+                    // A count from a shard that is not ready is partial at best, and the API forwards it to the public listing.
+                    if (status == ShardStatus.READY) put("guilds", guildsPerShard[id] ?: 0)
                 }
             },
         )
@@ -265,8 +269,12 @@ internal abstract class Publisher(protected val engine: Engine, val type: Publis
         }
     }
 
-    fun disable(status: Int?, reason: String, quiet: Boolean = false) {
+    protected fun clear() {
         timer?.cancel()
+    }
+
+    fun disable(status: Int?, reason: String, quiet: Boolean = false) {
+        clear()
         if (disabledReason != null) return
         disabledReason = reason
         engine.emit(TdlEvent.Disabled(type, status, reason), quiet)
@@ -282,16 +290,21 @@ internal abstract class Publisher(protected val engine: Engine, val type: Publis
     }
 
     /**
-     * Retries only transient failures. A backoff that would outlast the next tick is dropped
-     * instead: the next tick carries fresher data, and a failed request still burns budget.
+     * Retries transient failures and, once its window lifts, a 429. A wait that would outlast the
+     * next tick is dropped instead: the next tick carries fresher data, and a failed request still
+     * burns budget.
      */
-    protected suspend fun send(path: String, body: JsonElement, heartbeat: Boolean, nextTickInMs: Long?): PostResult {
+    protected suspend fun send(path: String, body: JsonElement, heartbeat: Boolean, nextTickInMs: Long): PostResult {
         var outcome: Outcome = Outcome.Dropped
         for (attempt in 0 until MAX_ATTEMPTS) {
-            outcome = engine.api.post(path, body, heartbeat)
-            if (outcome !is Outcome.Transient || attempt == MAX_ATTEMPTS - 1) break
-            val wait = backoffMs(attempt, engine.random)
-            if (nextTickInMs != null && wait >= nextTickInMs) break
+            val current = engine.api.post(path, body, heartbeat)
+            outcome = current
+            val wait = when (current) {
+                is Outcome.Throttled -> current.waitMs
+                is Outcome.Transient -> backoffMs(attempt, engine.random)
+                else -> break
+            }
+            if (attempt == MAX_ATTEMPTS - 1 || wait >= nextTickInMs) break
             delay(wait)
         }
         return react(outcome)
@@ -331,9 +344,11 @@ internal abstract class Publisher(protected val engine: Engine, val type: Publis
 }
 
 internal class StatsPublisher(engine: Engine, options: StatsOptions) : Publisher(engine, PublisherType.STATS) {
-    private val interval = options.interval.inWholeMilliseconds
+    private val minGap = maxOf(options.minGap.inWholeMilliseconds, STATS_MIN_GAP_MS)
+
+    /** An interval under the gap would spin between the floor and the unchanged-count skip. */
+    private val interval = maxOf(options.interval.inWholeMilliseconds, minGap)
     private val debounce = options.debounce.inWholeMilliseconds
-    private val minGap = options.minGap.inWholeMilliseconds
 
     private var lastPostAt: Long? = null
     private var lastCount: Int? = null
@@ -403,8 +418,7 @@ internal class StatsPublisher(engine: Engine, options: StatsOptions) : Publisher
             }
 
             val shardCount = engine.topology.shardCount
-            // Every stats post re-indexes the listing and fires a webhook even when nothing moved,
-            // and the server does not dedupe, so the skip has to happen here.
+            // The server treats a count that did not move as no news, so re-sending one only spends rate budget.
             if (count == lastCount && shardCount == lastShardCount && last != null &&
                 engine.now() < last + STATS_FORCE_AFTER_MS
             ) {
@@ -432,9 +446,10 @@ internal class StatsPublisher(engine: Engine, options: StatsOptions) : Publisher
 }
 
 internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : Publisher(engine, PublisherType.HEARTBEAT) {
-    private var interval = options.interval.inWholeMilliseconds
+    private var interval = clamp(options.interval.inWholeMilliseconds)
     private var inFlight = false
     private var lastBeatAt: Long? = null
+    private var beatNowPending = false
 
     fun start() {
         // Every beat hard-deletes the cluster rows with an id >= its cluster_count. A process that
@@ -453,11 +468,13 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
     }
 
     /**
-     * Out-of-band beat after a shard transition, at least 10 seconds after the previous one.
-     * Calls within a second coalesce.
+     * Out-of-band beat after a shard transition, at least 10 seconds after the previous one. Calls
+     * before it fires coalesce into it: moving it back on each would let a long burst starve the
+     * heartbeat past the server's grace window.
      */
     fun beatNow() {
-        if (disabledReason != null || engine.topology.clusterCount == null || engine.now() < suspendedUntil) return
+        if (disabledReason != null || beatNowPending || engine.topology.clusterCount == null || engine.now() < suspendedUntil) return
+        beatNowPending = true
         val earliest = lastBeatAt?.plus(HEARTBEAT_OUT_OF_BAND_GAP_MS) ?: 0L
         schedule(maxOf(earliest - engine.now(), 1_000L)) { beat(manual = false) }
     }
@@ -469,6 +486,7 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
     }
 
     private suspend fun beat(manual: Boolean): PostResult {
+        beatNowPending = false
         if (!manual && disabledReason != null) return skipped("disabled")
         if (inFlight) return skipped("in-flight")
         val clusterCount = engine.topology.clusterCount ?: return skipped("cluster-count-unknown")
@@ -506,15 +524,19 @@ internal class HeartbeatPublisher(engine: Engine, options: HeartbeatOptions) : P
         if (outcome is Outcome.Ok) {
             val seconds = ((outcome.body as? JsonObject)?.get("next_beat_within_seconds") as? JsonPrimitive)?.doubleOrNull
             if (seconds != null && seconds > 0) {
-                interval = (seconds / 3 * 1000).roundToLong().coerceIn(HEARTBEAT_MIN_INTERVAL_MS, HEARTBEAT_MAX_INTERVAL_MS)
+                interval = clamp((seconds / 3 * 1000).roundToLong())
             }
         }
         return super.react(outcome)
     }
+
+    private fun clamp(intervalMs: Long) = intervalMs.coerceIn(HEARTBEAT_MIN_INTERVAL_MS, HEARTBEAT_MAX_INTERVAL_MS)
 }
 
 internal class CommandsPublisher(engine: Engine, private val options: CommandsOptions) : Publisher(engine, PublisherType.COMMANDS) {
-    /** Once after ready. Commands change on deploy, and a deploy is a restart. */
+    private var inFlight = false
+
+    /** One success is enough. Commands change on deploy, and a deploy is a restart. */
     fun start() {
         if (disabledReason == null && engine.topology.isStatsPublisher) schedule(COMMANDS_DELAY_MS) { publish() }
     }
@@ -526,20 +548,45 @@ internal class CommandsPublisher(engine: Engine, private val options: CommandsOp
 
     private suspend fun publish(): PostResult {
         if (disabledReason != null) return skipped("disabled")
-        if (engine.now() < suspendedUntil) return skipped("plan")
-
-        val commands = try {
-            engine.fetchCommands()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            engine.emit(TdlEvent.Failed(type, null, false, "Could not fetch the global commands from Discord: ${e.message}"))
-            return skipped("fetch-failed")
+        if (inFlight) return skipped("in-flight")
+        clear()
+        if (engine.now() < suspendedUntil) {
+            retryLater()
+            return skipped("plan")
         }
 
-        // An empty array CLEARS the listing's commands, so it is never sent by accident.
-        if (commands.isEmpty() && !options.postEmpty) return skipped("empty")
+        inFlight = true
+        try {
+            val commands = try {
+                engine.fetchCommands()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                engine.emit(TdlEvent.Failed(type, null, true, "Could not fetch the global commands from Discord: ${e.message}"))
+                retryLater()
+                return skipped("fetch-failed")
+            }
 
-        return send("/bots/${engine.botId}/commands", buildJsonObject { put("commands", commands) }, heartbeat = false, nextTickInMs = null)
+            // An empty array CLEARS the listing's commands, so it is never sent by accident.
+            if (commands.isEmpty() && !options.postEmpty) return skipped("empty")
+
+            return send("/bots/${engine.botId}/commands", buildJsonObject { put("commands", commands) }, heartbeat = false, nextTickInMs = COMMANDS_RETRY_MS)
+        } finally {
+            inFlight = false
+        }
+    }
+
+    /** Nothing else will post these until the next deploy, so everything short of a rejection is tried again. */
+    override fun react(outcome: Outcome): PostResult {
+        val result = super.react(outcome)
+        when (outcome) {
+            is Outcome.Transient, is Outcome.Throttled, Outcome.Dropped, Outcome.Plan -> retryLater()
+            else -> Unit
+        }
+        return result
+    }
+
+    private fun retryLater() {
+        schedule(maxOf(COMMANDS_RETRY_MS, suspendedUntil - engine.now())) { publish() }
     }
 }

@@ -24,7 +24,9 @@ internal fun interface Transport {
     fun close() {}
 }
 
-internal class JdkTransport(private val timeout: Duration = 10.seconds) : Transport {
+internal val REQUEST_TIMEOUT: Duration = 10.seconds
+
+internal class JdkTransport(private val timeout: Duration = REQUEST_TIMEOUT) : Transport {
     private val client = lazy { HttpClient.newBuilder().connectTimeout(timeout.toJavaDuration()).build() }
 
     override suspend fun post(url: String, headers: Map<String, String>, body: String): HttpReply {
@@ -49,16 +51,20 @@ internal sealed interface Outcome {
     data object Auth : Outcome
     data object Plan : Outcome
     data class Config(val status: Int) : Outcome
-    data class Throttled(val retryAfterMs: Long) : Outcome
+    data class Throttled(val waitMs: Long) : Outcome
     data class Transient(val status: Int?, val message: String) : Outcome
     data object Dropped : Outcome
 }
 
-private const val MAX_RETRY_AFTER_MS = 3_600_000L
+internal const val BACKOFF_BASE_MS = 1_000L
+internal const val BACKOFF_MAX_MS = 30_000L
+internal const val DEFAULT_RETRY_AFTER_MS = 60_000L
+internal const val MAX_RETRY_AFTER_MS = 3_600_000L
+internal const val RATE_LIMIT_JITTER_MS = 2_000L
 
 /** `min(1000 * 2^attempt, 30000)` scaled into its upper half. */
 internal fun backoffMs(attempt: Int, random: Random): Long =
-    (min(1000L shl attempt, 30_000L) * (0.5 + random.nextDouble() * 0.5)).roundToLong()
+    (min(BACKOFF_BASE_MS shl attempt, BACKOFF_MAX_MS) * (0.5 + random.nextDouble() * 0.5)).roundToLong()
 
 /**
  * One client per poster, with one suspension: the API counts stats and commands against one
@@ -99,7 +105,7 @@ internal class ApiClient(
             403 -> Outcome.Plan
             // 404 is "unknown id, or the id belongs to a server listing". Never "bad token".
             404, 409 -> Outcome.Config(status)
-            429 -> throttle(reply)
+            429 -> throttle(reply, heartbeat)
             408, 425, in 500..599 -> Outcome.Transient(status, "TheDiscordList responded $status.")
             else -> Outcome.Payload(status)
         }
@@ -107,13 +113,15 @@ internal class ApiClient(
 
     fun close() = transport.close()
 
-    private fun throttle(reply: HttpReply): Outcome.Throttled {
+    private fun throttle(reply: HttpReply, heartbeat: Boolean): Outcome.Throttled {
         val retryAfterMs = reply.header("Retry-After")?.toDoubleOrNull()?.takeIf { it > 0 }
-            ?.let { (it * 1000).roundToLong() } ?: 60_000L
+            ?.let { (it * 1000).roundToLong() } ?: DEFAULT_RETRY_AFTER_MS
         // The reset is a wall-clock epoch, so only the time left until it carries over to the monotonic clock.
         val untilResetMs = reply.header("X-RateLimit-Reset")?.toLongOrNull()?.takeIf { it > 0 }
             ?.let { it * 1000 - System.currentTimeMillis() } ?: 0L
-        suspendedUntil = now() + min(max(retryAfterMs, untilResetMs), MAX_RETRY_AFTER_MS) + random.nextLong(0, 2_001)
-        return Outcome.Throttled(retryAfterMs)
+        val waitMs = min(max(retryAfterMs, untilResetMs), MAX_RETRY_AFTER_MS) + random.nextLong(0, RATE_LIMIT_JITTER_MS + 1)
+        // The server limits heartbeats apart from stats and commands, so one says nothing about the other.
+        if (!heartbeat) suspendedUntil = now() + waitMs
+        return Outcome.Throttled(waitMs)
     }
 }
